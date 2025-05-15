@@ -1,4 +1,4 @@
-# proto sync helper
+# miku's proto sync helper
 Plugin syncs proto files from repository
 
 ## Features
@@ -25,5 +25,4 @@ protoSync {
 }
 ```
 
-2. Build your project, plugin will automatically clone mentioned proto files and add them to source sets\
-
+2. Build your project, plugin will automatically clone mentioned proto files and add them to source set
