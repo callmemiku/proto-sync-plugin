@@ -12,6 +12,7 @@ import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.tasks.TaskAction
 
 import java.nio.file.Paths
+import java.time.Instant
 
 class ProtoSyncPlugin implements Plugin<Project> {
     void apply(Project project) {
@@ -25,7 +26,7 @@ class ProtoSyncPlugin implements Plugin<Project> {
                 repository = config.repository
                 output = calculatedOutput
                 requested = config.services
-                depth = config.depth
+                depth = config.depth ?: 3
             }
             project.tasks.register('commitChangeRequest', ChangeRequestTask) {
                 group = 'proto'
@@ -158,6 +159,26 @@ class ChangeRequestTask extends DefaultTask {
 
     @TaskAction
     void execute() {
-
+        def source = new File(output)
+        def tempRepo = new File(source, "temp-repo")
+        def git = new File(tempRepo, ".git")
+        if (git.exists()) git.deleteDir()
+        if (tempRepo.exists()) tempRepo.deleteDir()
+        def branchName = "${System.getProperty("user.name") ?: "UNKNOWN_USERNAME"}-at-${Instant.now().toEpochMilli()}"
+        ["git", "clone", "--depth=1", repository, tempRepo.absolutePath].execute().waitFor()
+        ["git", "checkout", "-b", branchName].execute(null, tempRepo).waitFor()
+        source.eachFileRecurse { file ->
+            if (!file.isFile()) return
+            def rel = source.toPath().relativize(file.toPath()).toString()
+            def targetFile = new File(tempRepo, rel)
+            targetFile.parentFile.mkdirs()
+            file.withInputStream { is -> targetFile.withOutputStream { os -> os << is } }
+        }
+        ["git", "add", "."].execute(null, tempRepo).waitFor()
+        ["git", "commit", "-m", branchName].execute(null, tempRepo).waitFor()
+        ["git", "push", "--set-upstream", "origin", branchName].execute(null, tempRepo).waitFor()
+        if (git.exists()) git.deleteDir()
+        if (tempRepo.exists()) tempRepo.deleteDir()
+        println "Successfully pushed branch $branchName to origin."
     }
 }
