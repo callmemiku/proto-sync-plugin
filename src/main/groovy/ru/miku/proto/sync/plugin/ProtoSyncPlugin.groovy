@@ -11,6 +11,7 @@ import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.tasks.TaskAction
 
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.time.Instant
 
@@ -90,13 +91,11 @@ class SyncProtoTask extends DefaultTask {
 
     @TaskAction
     void execute() {
-        project.exec {
-            commandLine('git', 'clone', "--depth=$depth", repository, temp.absolutePath)
-        }
-        sleep(1000)
+        ['git', 'clone', "--depth=$depth", repository, temp.absolutePath].execute().waitFor()
         println "Pulled successfully."
         println "Now filtering only files requested..."
-        def filesToLook = requested.collect { (it + ".proto").toUpperCase() }
+        List<Path> alreadyFound = []
+        def filesToLook = requested.collect { (it + ".proto").toUpperCase() }.unique()
         println "Initially looking for ${filesToLook.toString()}"
         while (!filesToLook.isEmpty()) {
             def additionallyFound = []
@@ -104,25 +103,32 @@ class SyncProtoTask extends DefaultTask {
             temp.eachFileRecurse(FileType.FILES) {
                 def name = it.name.toUpperCase()
                 if (name.contains(".PROTO") && filesToLook.contains(name)) {
-                    it.readLines().findAll {
-                        it.contains("import ") && !it.contains("google")
-                    }.each {
-                        additionallyFound << it.replace("import \"", "")
-                        .replace("\";", "").toUpperCase()
-                    }
                     def relativePath = temp.toPath().relativize(it.toPath())
-                    def target = Paths.get(output).resolve(relativePath).normalize().toFile()
-                    def protoDir = new File(target.parent)
-                    if (protoDir.exists() && !protoDir.isDirectory()) {
-                        protoDir.delete()
-                        protoDir.mkdirs()
-                    } else {
-                        protoDir.mkdirs()
+                    if (!alreadyFound.contains(relativePath)) {
+                        alreadyFound << relativePath
+                        it.readLines().findAll {
+                            it.contains("import ") && !it.contains("google")
+                        }.each {
+                            additionallyFound << it.replace("import \"", "")
+                                    .replace("\";", "")
+                                    .split("/")
+                                    .last()
+                                    .toUpperCase()
+                        }
+
+                        def target = Paths.get(output).resolve(relativePath).normalize().toFile()
+                        def protoDir = new File(target.parent)
+                        if (protoDir.exists() && !protoDir.isDirectory()) {
+                            protoDir.delete()
+                            protoDir.mkdirs()
+                        } else {
+                            protoDir.mkdirs()
+                        }
+                        println "File ${it.name} created."
+                        target.write(it.text)
+                        println "Protofile ${it.name} is ready to use."
+                        found << name
                     }
-                    println "File ${it.name} created."
-                    target.write(it.text)
-                    println "Protofile ${it.name} is ready to use."
-                    found << name
                 }
             }
             filesToLook = filesToLook.findAll { !found.contains(it) }
