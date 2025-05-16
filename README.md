@@ -5,6 +5,7 @@ Plugin syncs proto files from repository
 - Plugin automatically pulls most recent versions of proto files mentioned in configuration on each build 
 - Plugin allows to push to remote with `commitChangeRequest` task, changes are only tracked on proto files in build/resources/main/proto-sync directory
 - Plugin resolves imports, so you don't have to include all supporting and shared proto files
+- Plugin allows to set rules to how to fetch proto files on proto repository, for example to divide production files from development using rules as in example below. Rules support kind of pattern matching: if rule starts with * plugin will think that all branches that end with it are pass and if rules ends with * branch will pass if it's name start with said prefix
 
 ## Installation
 In plugins section of your `build.gradle(.kts)` add following:
@@ -22,6 +23,12 @@ protoSync {
     services = listOf("service name 1", "service name 2")
     //tells how deep to clone your repo
     depth = 3
+    //rules are relation of current branch of project to branch in proto repo
+    rules = mapOf("master" to "main")
+    //default branch to go if there's no rule
+    defaultBranch = "dev"
+    //optional parameter which allows to add prefix to branches created with commitChangeRequest task
+    autoBranchPrefix = "test-prefix"
 }
 ```
 

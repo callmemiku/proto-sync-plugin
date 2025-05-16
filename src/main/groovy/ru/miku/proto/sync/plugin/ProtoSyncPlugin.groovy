@@ -28,12 +28,15 @@ class ProtoSyncPlugin implements Plugin<Project> {
                 output = calculatedOutput
                 requested = config.services
                 depth = config.depth ?: 3
+                rules = config.rules
+                defaultBranch = config.defaultBranch
             }
             project.tasks.register('commitChangeRequest', ChangeRequestTask) {
                 group = 'proto'
                 description = 'Prepares and pushes branch to proto repository'
                 repository = config.repository
                 output = calculatedOutput
+                prefix = config.autoBranchPrefix
             }
             project.tasks.register('cleanAfterMyself', CleanupTask) {
                 group = 'proto'
@@ -70,6 +73,9 @@ class Configuration {
     String repository
     List<String> services
     Integer depth
+    String defaultBranch
+    Map<String, String> rules
+    String autoBranchPrefix
 }
 
 class SyncProtoTask extends DefaultTask {
@@ -89,14 +95,30 @@ class SyncProtoTask extends DefaultTask {
     @Internal
     File temp = project.file("${project.buildDir}/temp")
 
+    @Input
+    String defaultBranch
+
+    @Input
+    Map<String, String> rules
+
     @TaskAction
     void execute() {
-        ['git', 'clone', "--depth=$depth", repository, temp.absolutePath].execute().waitFor()
-        println "Pulled successfully."
-        println "Now filtering only files requested..."
+        if (defaultBranch == null) throw new IllegalStateException("No default branch provided, please provide in configuration under defaultBranch parameter!")
+        if (rules == null || rules.isEmpty()) println "[INFO] No branching rules provided, always using default branch!"
+        def currentBranch = System.getProperty("BRANCH")
+        if (currentBranch == null) throw new IllegalStateException("No branch name provided via properties. Example: -DBRANCH=NAME gradle build ... ")
+        String rulesBranch
+        if ((rulesBranch = findInRules(rules, currentBranch)) == null) {
+            ['git', 'clone', "--depth=$depth", '--branch', defaultBranch, '--single-branch', repository, temp.absolutePath].execute().waitFor()
+            println "[INFO] Using default branch: $defaultBranch."
+        } else {
+            ['git', 'clone', "--depth=$depth", '--branch', rulesBranch, '--single-branch', repository, temp.absolutePath].execute().waitFor()
+            println "[INFO] Cloned branch: $rulesBranch."
+        }
+        println "[INFO] Now filtering only files requested..."
         List<Path> alreadyFound = []
         def filesToLook = requested.collect { (it + ".proto").toUpperCase() }.unique()
-        println "Initially looking for ${filesToLook.toString()}"
+        println "[INFO] Initially looking for ${filesToLook.toString()}"
         while (!filesToLook.isEmpty()) {
             def additionallyFound = []
             def found = []
@@ -124,20 +146,35 @@ class SyncProtoTask extends DefaultTask {
                         } else {
                             protoDir.mkdirs()
                         }
-                        println "File ${it.name} created."
+                        println "[INFO] File ${it.name} created."
                         target.write(it.text)
-                        println "Protofile ${it.name} is ready to use."
+                        println "[INFO] Protofile ${it.name} is ready to use."
                         found << name
                     }
                 }
             }
             filesToLook = filesToLook.findAll { !found.contains(it) }
-            if (!filesToLook.isEmpty()) println "Following services were NOT found: ${filesToLook.toString()}"
+            if (!filesToLook.isEmpty()) println "[INFO] Following services were NOT found: ${filesToLook.toString()}"
             filesToLook.clear()
             filesToLook.addAll(additionallyFound)
-            if (!filesToLook.isEmpty()) println "Found additional dependency protos: ${filesToLook.toString()}"
+            if (!filesToLook.isEmpty()) println "[INFO] Found additional dependency protos: ${filesToLook.toString()}"
         }
-        println "Done filtering cloned files."
+        println "[SUCCESS] Done filtering cloned files."
+    }
+
+    private String findInRules(Map<String, String> rules, String branch) {
+        if (rules == null || rules.isEmpty()) return null
+        if (rules.containsKey(branch)) return rules.get(branch)
+        return rules.findAll {
+            it.key.contains("*")
+        }.find {
+            def key = it.key.replace("*", "")
+            if (it.key.startsWith("*")) {
+                branch.endsWith(key)
+            } else if (it.key.endsWith("*")) {
+                branch.startsWith(key)
+            } else false
+        }?.value
     }
 }
 
@@ -163,6 +200,9 @@ class ChangeRequestTask extends DefaultTask {
     @Input
     String output
 
+    @Input
+    String prefix
+
     @TaskAction
     void execute() {
         def source = new File(output)
@@ -170,7 +210,7 @@ class ChangeRequestTask extends DefaultTask {
         def git = new File(tempRepo, ".git")
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
-        def branchName = "${System.getProperty("user.name") ?: "UNKNOWN_USERNAME"}-at-${Instant.now().toEpochMilli()}"
+        def branchName = "${prefix ? "$prefix-" : ""}${System.getProperty("user.name") ?: "UNKNOWN_USERNAME"}-at-${Instant.now().toEpochMilli()}"
         ["git", "clone", "--depth=1", repository, tempRepo.absolutePath].execute().waitFor()
         ["git", "checkout", "-b", branchName].execute(null, tempRepo).waitFor()
         source.eachFileRecurse { file ->
