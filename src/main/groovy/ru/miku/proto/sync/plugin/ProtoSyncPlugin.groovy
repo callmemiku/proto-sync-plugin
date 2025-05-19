@@ -109,16 +109,18 @@ class SyncProtoTask extends DefaultTask {
         if (currentBranch == null) throw new IllegalStateException("No branch name provided via properties. Example: -DBRANCH=NAME gradle build ... ")
         String rulesBranch
         if ((rulesBranch = findInRules(rules, currentBranch)) == null) {
-            ['git', 'clone', "--depth=$depth", '--branch', defaultBranch, '--single-branch', repository, temp.absolutePath].execute().waitFor()
-            println "[INFO] Using default branch: $defaultBranch."
+            println "[INFO] Using default branch: $defaultBranch to clone..."
+            Utils.runProcess(['git', 'clone', "--depth=$depth", '--branch', defaultBranch, '--single-branch', repository, temp.absolutePath])
         } else {
-            ['git', 'clone', "--depth=$depth", '--branch', rulesBranch, '--single-branch', repository, temp.absolutePath].execute().waitFor()
-            println "[INFO] Cloned branch: $rulesBranch."
+            println "[INFO] Cloning branch: $rulesBranch..."
+            Utils.runProcess(['git', 'clone', "--depth=$depth", '--branch', rulesBranch, '--single-branch', repository, temp.absolutePath])
         }
+        println "[INFO] Successfully cloned repository."
         println "[INFO] Now filtering only files requested..."
         List<Path> alreadyFound = []
         def filesToLook = requested.collect { (it + ".proto").toUpperCase() }.unique()
-        println "[INFO] Initially looking for ${filesToLook.toString()}"
+        if (!filesToLook.isEmpty()) println "[INFO] Initially looking for ${filesToLook.toString()}"
+        else println "[INFO] No services in configuration, filtering skipped."
         while (!filesToLook.isEmpty()) {
             def additionallyFound = []
             def found = []
@@ -178,6 +180,18 @@ class SyncProtoTask extends DefaultTask {
     }
 }
 
+class Utils {
+    static void runProcess(List<String> command, File runAt = null) {
+        def _ = new StringBuffer()
+        def out = new StringBuffer()
+        def proc = runAt ? command.execute(null, runAt) : command.execute()
+        proc.consumeProcessOutput(_, out)
+        def exitCode = proc.waitFor()
+        if (out.length() > 0) println "[INFO] git log: \n\t> ${def buf = out.toString(); buf.substring(0, buf.length() - 1).replace("\n", "\n\t> ")}"
+        if (exitCode != 0) throw new IllegalStateException("Non zero exit code from git process, aborting...")
+    }
+}
+
 class CleanupTask extends DefaultTask {
 
     @Internal
@@ -211,8 +225,8 @@ class ChangeRequestTask extends DefaultTask {
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
         def branchName = "${prefix ? "$prefix-" : ""}${System.getProperty("user.name") ?: "UNKNOWN_USERNAME"}-at-${Instant.now().toEpochMilli()}"
-        ["git", "clone", "--depth=1", repository, tempRepo.absolutePath].execute().waitFor()
-        ["git", "checkout", "-b", branchName].execute(null, tempRepo).waitFor()
+        Utils.runProcess(["git", "clone", "--depth=1", repository, tempRepo.absolutePath])
+        Utils.runProcess(["git", "checkout", "-b", branchName], tempRepo)
         source.eachFileRecurse { file ->
             if (!file.isFile()) return
             def rel = source.toPath().relativize(file.toPath()).toString()
@@ -220,9 +234,9 @@ class ChangeRequestTask extends DefaultTask {
             targetFile.parentFile.mkdirs()
             file.withInputStream { is -> targetFile.withOutputStream { os -> os << is } }
         }
-        ["git", "add", "."].execute(null, tempRepo).waitFor()
-        ["git", "commit", "-m", branchName].execute(null, tempRepo).waitFor()
-        ["git", "push", "--set-upstream", "origin", branchName].execute(null, tempRepo).waitFor()
+        Utils.runProcess(["git", "add", "."], tempRepo)
+        Utils.runProcess(["git", "commit", "-m", branchName], tempRepo)
+        Utils.runProcess(["git", "push", "--set-upstream", "origin", branchName], tempRepo)
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
         println "Successfully pushed branch $branchName to origin."
