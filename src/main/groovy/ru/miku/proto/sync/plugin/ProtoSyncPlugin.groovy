@@ -116,7 +116,6 @@ class CloneCommand {
     }
 
     List<String> cmd() {
-        throw new IllegalStateException()
         if (mode == Mode.WITH_BRANCH) {
             ['git', 'clone', "--depth=$depth", '--branch', branch, '--single-branch', repository, repositoryPath]
         } else {
