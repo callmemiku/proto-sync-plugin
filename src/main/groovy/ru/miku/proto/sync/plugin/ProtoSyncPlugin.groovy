@@ -116,6 +116,7 @@ class CloneCommand {
     }
 
     List<String> cmd() {
+        throw new IllegalStateException()
         if (mode == Mode.WITH_BRANCH) {
             ['git', 'clone', "--depth=$depth", '--branch', branch, '--single-branch', repository, repositoryPath]
         } else {
@@ -139,17 +140,17 @@ class CloneCommand {
 
     private String convertToSSH(String repository) {
         if (repository.startsWith("git")) return repository
-        println "${Utils.info()} No predefined ssh URL provided, trying to convert..."
+        Log.info "No predefined ssh URL provided, trying to convert..."
         def pattern = ~/https?:\/\/(.*?)(?:\/|:)(.*?)(?:\.git)?$/
         def matcher = repository.toLowerCase() =~ pattern
         if (matcher.matches()) {
             def domain = matcher[0][1]
             def repoPath = matcher[0][2]
             def result = "git@${domain}:${repoPath}.git"
-            println Utils.invalidConf("Resulting ssh URL: ${result}. If it's not valid, please provide actual URL under sshWhereabouts.SSH_REPOSITORY_URL.")
+            Log.invalidConf "Resulting ssh URL: ${result}. If it's not valid, please provide actual URL under sshWhereabouts.SSH_REPOSITORY_URL."
             result
         } else {
-            throw new IllegalArgumentException("[proto-sync::FATAL] Not a valid HTTP(S) Git URL: $repository")
+            throw Log.fatal("Not a valid HTTP(S) Git URL: $repository")
         }
     }
 }
@@ -185,29 +186,29 @@ class SyncProtoTask extends DefaultTask {
 
     @TaskAction
     void execute() {
-        if (defaultBranch == null) throw new IllegalStateException("[proto-sync::FATAL] No default branch provided, please provide in configuration under defaultBranch parameter!")
-        if (rules == null || rules.isEmpty()) println Utils.invalidConf("No branching rules provided, always using default branch!")
+        if (defaultBranch == null) throw Log.fatal("No default branch provided, please provide in configuration under defaultBranch parameter!")
+        if (rules == null || rules.isEmpty()) Log.invalidConf "No branching rules provided, always using default branch!"
         temp.parentFile.mkdirs()
         keyTemp.parentFile.mkdirs()
         def currentBranch = System.getProperty("BRANCH") ?: System.getenv("BRANCH")
-        if (Utils.isStringNotOK(currentBranch)) println Utils.invalidConf("No project branch name provided via properties. Example: -DBRANCH=NAME gradle ... . Using default ($defaultBranch).")
+        if (Utils.isStringNotOK(currentBranch)) Log.invalidConf "No project branch name provided via properties. Example: -DBRANCH=NAME gradle ... . Using default ($defaultBranch)."
         def branch
         String rulesBranch
         if ((rulesBranch = findInRules(rules, currentBranch)) == null) {
-            println "${Utils.info()} Using default branch: $defaultBranch to clone..."
+            Log.info("Using default branch: $defaultBranch to clone...")
             branch = defaultBranch
         } else {
-            println "${Utils.info()} Cloning branch: $rulesBranch..."
+            Log.info("Cloning branch: $rulesBranch...")
             branch = rulesBranch
         }
         sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
         Utils.clone(repository, branch, depth, temp.absolutePath, sshWhereabouts)
-        println Utils.success("Successfully cloned repository.")
-        println "${Utils.info()} Now filtering only files requested..."
+        Log.success "Successfully cloned repository."
+        Log.info "Now filtering only files requested..."
         List<Path> alreadyFound = []
         def filesToLook = requested.collect { (it + ".proto").toUpperCase() }.unique()
-        if (!filesToLook.isEmpty()) println "${Utils.info()} Initially looking for ${filesToLook.toString()}"
-        else println Utils.invalidConf("No services in configuration, filtering skipped.")
+        if (!filesToLook.isEmpty()) Log.info "Initially looking for ${filesToLook.toString()}"
+        else Log.invalidConf "No services in configuration, filtering skipped."
         while (!filesToLook.isEmpty()) {
             def additionallyFound = []
             def found = []
@@ -235,20 +236,20 @@ class SyncProtoTask extends DefaultTask {
                         } else {
                             protoDir.mkdirs()
                         }
-                        println "${Utils.info()} File ${it.name} created."
+                        Log.info "File ${it.name} created."
                         target.write(it.text)
-                        println "${Utils.info()} Protofile ${it.name} is ready to use."
+                        Log.info "Protofile ${it.name} is ready to use."
                         found << name
                     }
                 }
             }
             filesToLook = filesToLook.findAll { !found.contains(it) }
-            if (!filesToLook.isEmpty()) println "${Utils.error()} Following services were NOT found: ${filesToLook.toString()}"
+            if (!filesToLook.isEmpty()) Log.error "Following services were NOT found: ${filesToLook.toString()}"
             filesToLook.clear()
             filesToLook.addAll(additionallyFound)
-            if (!filesToLook.isEmpty()) println "${Utils.info()} Found additional dependency protos: ${filesToLook.toString()}"
+            if (!filesToLook.isEmpty()) Log.info "Found additional dependency protos: ${filesToLook.toString()}"
         }
-        println Utils.success("Done filtering cloned files.")
+        Log.success "Done filtering cloned files."
     }
 
     private String findInRules(Map<String, String> rules, String branch) {
@@ -267,28 +268,33 @@ class SyncProtoTask extends DefaultTask {
     }
 }
 
-class Utils {
-
-    static boolean isStringNotOK(String patient) {
-        patient == null || patient.isEmpty() || patient.isBlank() || patient == 'null'
+class Log {
+    static void info(String msg) {
+        println "${yellow()}[proto-sync::INFO]${reset()} $msg"
     }
 
-    static String info() {
-        "${yellow()}[proto-sync::INFO]${reset()}"
+    static void invalidConf(String msg) {
+        println "${blue()}[proto-sync::POSSIBLE INVALID CONFIGURATION] $msg${reset()}"
     }
 
-    static String invalidConf(String msg) {
-        "${blue()}[proto-sync::POSSIBLE INVALID CONFIGURATION] $msg${reset()}"
+    static void error(String msg) {
+        println "${red()}[proto-sync::ERROR]${reset()} $msg"
     }
-    
-    static String error() {
-        "${red()}[proto-sync::ERROR]${reset()}"
+
+    static void success(String msg) {
+        println "${green()}[proto-sync::SUCCESS] $msg${reset()}"
     }
-    
-    static String success(String msg) {
-        "${green()}[proto-sync::SUCCESS] $msg${reset()}"
+
+    static void external(String msg, Process proc) {
+        def cmd = proc.info().command().orElse "Process ${proc.pid()}"
+        println "${cyan()}[proto-sync::EXTERNAL] $cmd:"
+        println "${cyan()} $msg${reset()}"
     }
-    
+
+    static IllegalStateException fatal(String msg) {
+        new IllegalStateException("[proto-sync::FATAL] $msg")
+    }
+
     private static String green() { '\u001B[32m' }
 
     private static String red() { '\u001B[31m' }
@@ -299,7 +305,14 @@ class Utils {
 
     private static String cyan() { '\u001B[36m' }
 
-    static String reset() { '\u001B[0m' }
+    private static String reset() { '\u001B[0m' }
+}
+
+class Utils {
+
+    static boolean isStringNotOK(String patient) {
+        patient == null || patient.isEmpty() || patient.isBlank() || patient == 'null'
+    }
 
     static void runProcess(List<String> command, File runAt = null) {
         def proc = runAt ? command.execute(null, runAt) : command.execute()
@@ -311,8 +324,8 @@ class Utils {
         def out = new StringBuffer()
         proc.consumeProcessOutput(_, out)
         def exitCode = proc.waitFor()
-        if (out.length() > 0) println "${cyan()}[proto-sync::EXTERNAL] git:\n\t> ${def buf = out.toString(); buf.substring(0, buf.length() - 1).replace("\n", "\n\t> ")}${reset()}"
-        if (exitCode != 0) throw new IllegalStateException("[proto-sync::FATAL] Non zero exit code from git process, aborting...")
+        if (out.length() > 0) Log.external "\t> ${def buf = out.toString(); buf.substring(0, buf.length() - 1).replace("\n", "\n\t> ")}", proc
+        if (exitCode != 0) throw Log.fatal("Non zero exit code from ${proc.pid()} process, aborting...")
     }
 
     static void runProcess(ProcessBuilder pb, File runAt = null) {
@@ -330,21 +343,19 @@ class Utils {
     ) {
         def command = new CloneCommand(repository, repositoryPath, depth, branch, sshWhereabouts.get(SshConfiguration.SSH_REPOSITORY_URL))
         try {
-            println "${info()} Cloning by HTTPS..."
+            Log.info "Cloning by HTTPS..."
             runProcess(command.cmd(), runAt)
         } catch (Exception ignored) {
             if (!containsNotNull(sshWhereabouts, SshConfiguration.NEXUS_URL)) {
-                println invalidConf("No key URL provided, not trying ssh, aborting...")
+                Log.invalidConf "No key URL provided, not trying ssh, aborting..."
                 throw ignored
             }
-            println "${info()} Cloning by HTTPS failed, trying ssh..."
-            def key = getKeyFromNexus(sshWhereabouts)
-            def keyPath = sanitizePath(key)
+            Log.info "Cloning by HTTPS failed, trying ssh..."
+            def key = getKeyFromNexus sshWhereabouts
+            def keyPath = sanitizePath key
             sshWhereabouts.put(SshConfiguration.KEY_PATH, keyPath)
-            def pb = processBuilder(command.cmdSSH(),
-                ['GIT_SSH_COMMAND' : "ssh -i $keyPath".toString()]
-            )
-            runProcess(pb, runAt)
+            def pb = processBuilder command.cmdSSH(), ['GIT_SSH_COMMAND': "ssh -i $keyPath".toString()]
+            runProcess pb, runAt
         }
     }
 
@@ -368,7 +379,7 @@ class Utils {
 
     static String safeGetProperty(Map<SshConfiguration, String> props, SshConfiguration key) {
         def value = props.get(key)
-        if (isStringNotOK(value)) throw new IllegalStateException("[proto-sync::FATAL] Invalid value in property ${key.name()}: ${value}")
+        if (isStringNotOK(value)) throw Log.fatal("Invalid value in property ${key.name()}: ${value}")
         value
     }
 
@@ -387,13 +398,13 @@ class Utils {
             def passwordKey = safeGetProperty(sshKeyWhereabouts, SshConfiguration.PASSWORD_ENV)
             def user = System.getProperty(userKey) ?: System.getenv(userKey)
             def password = System.getProperty(passwordKey) ?: System.getenv(passwordKey)
-            if (user == null) throw new IllegalStateException("[proto-sync::FATAL] No property exists on provided property: $userKey.")
-            if (password == null) throw new IllegalStateException("[proto-sync::FATAL] No property exists on provided property: $passwordKey.")
+            if (user == null) throw Log.fatal("No property exists on provided property: $userKey.")
+            if (password == null) throw Log.fatal("No property exists on provided property: $passwordKey.")
             connection.setRequestProperty("Authorization", "Basic " + "$user:$password".bytes.encodeBase64().toString())
-        } else println invalidConf("No auth credentials provided, going in unauthorized.")
+        } else Log.invalidConf "No auth credentials provided, going in unauthorized."
         def path = safeGetProperty(sshKeyWhereabouts, SshConfiguration.KEY_PATH)
         def download = Paths.get(path).resolve("download${mode.ext}").normalize().toFile()
-        println success("Successfully downloaded ${download.name}.")
+        Log.success "Successfully downloaded ${download.name}."
         download.parentFile.mkdirs()
         download.withOutputStream { out ->
             connection.inputStream.withStream { input ->
@@ -418,8 +429,16 @@ class Utils {
                 break
             default: output.write(download.text)
         }
-        println success("Successfully processed key file, stored as ${Paths.get(path).parent.parent.relativize(output.toPath())}.")
+        Log.success "Successfully processed key file, stored as ${Paths.get(path).parent.parent.relativize(output.toPath())}."
+        chmod600(output)
         return output
+    }
+
+    private static void chmod600(File file) {
+        Log.info "Changing permissions of ${file.parentFile.name}/${file.name} to 600."
+        if (System.getProperty("os.name")?.toLowerCase()?.contains("win")) {
+            Log.info "Unlucky, can't chmod on windows."
+        } else runProcess (['chmod', "600", file.absolutePath])
     }
 
     private enum FileType {
@@ -448,11 +467,11 @@ class CleanupTask extends DefaultTask {
         if (git.exists()) git.deleteDir()
         if (temp.exists()) {
             project.delete(temp)
-            println "${Utils.info()} Temp directory cleaned."
+            Log.info "Temp directory cleaned."
         }
         if (key.exists()) {
             project.delete(key)
-            println "${Utils.info()} ssh directory cleaned."
+            Log.info "ssh directory cleaned."
         }
     }
 }
@@ -493,13 +512,10 @@ class ChangeRequestTask extends DefaultTask {
         Utils.runProcess(["git", "add", "."], tempRepo)
         Utils.runProcess(["git", "commit", "-m", branchName], tempRepo)
         def cmd = ["git", "push", "--set-upstream", "origin", branchName]
-        def pb = Utils.processBuilder(
-                cmd,
-                ['GIT_SSH_COMMAND' : "ssh -i ${sshWhereabouts.get(SshConfiguration.KEY_PATH)}".toString()]
-        )
-        Utils.runProcess(pb, tempRepo)
+        def pb = Utils.processBuilder cmd, ['GIT_SSH_COMMAND': "ssh -i ${sshWhereabouts.get(SshConfiguration.KEY_PATH)}".toString()]
+        Utils.runProcess pb, tempRepo
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
-        println Utils.success("Successfully pushed branch $branchName to origin.")
+        Log.success "Successfully pushed branch $branchName to origin."
     }
 }
