@@ -31,7 +31,7 @@ class ProtoSyncPlugin implements Plugin<Project> {
                 depth = config.depth ?: 3
                 rules = config.rules
                 defaultBranch = config.defaultBranch
-                sshKeyWhereabouts = config.sshKeyWhereabouts
+                sshWhereabouts = config.sshWhereabouts
             }
             project.tasks.register('commitChangeRequest', ChangeRequestTask) {
                 group = 'proto'
@@ -39,7 +39,7 @@ class ProtoSyncPlugin implements Plugin<Project> {
                 repository = config.repository
                 output = calculatedOutput
                 prefix = config.autoBranchPrefix
-                sshKeyWhereabouts = config.sshKeyWhereabouts
+                sshWhereabouts = config.sshWhereabouts
             }
             project.tasks.register('cleanAfterMyself', CleanupTask) {
                 group = 'proto'
@@ -78,6 +78,7 @@ enum SshConfiguration {
     FILE_NAME_IN_ARCHIVE,
     USER_ENV,
     PASSWORD_ENV,
+    SSH_REPOSITORY_URL,
     KEY_PATH
 }
 
@@ -88,7 +89,7 @@ class Configuration {
     String defaultBranch
     Map<String, String> rules
     String autoBranchPrefix
-    Map<SshConfiguration, String> sshKeyWhereabouts
+    Map<SshConfiguration, String> sshWhereabouts
 }
 
 class CloneCommand {
@@ -103,10 +104,11 @@ class CloneCommand {
             String repository,
             String repositoryPath,
             Integer depth,
-            String branch
+            String branch,
+            String repositorySSH
     ) {
         this.repository = repository
-        this.repositorySSH = convertToSSH(repository)
+        this.repositorySSH = repositorySSH ?: convertToSSH(repository)
         this.repositoryPath = repositoryPath
         this.depth = depth
         this.branch = branch
@@ -137,14 +139,17 @@ class CloneCommand {
 
     private String convertToSSH(String repository) {
         if (repository.startsWith("git")) return repository
+        println "${Utils.info()} No predefined ssh URL provided, trying to convert..."
         def pattern = ~/https?:\/\/(.*?)(?:\/|:)(.*?)(?:\.git)?$/
         def matcher = repository.toLowerCase() =~ pattern
         if (matcher.matches()) {
             def domain = matcher[0][1]
             def repoPath = matcher[0][2]
-            return "ssh://git@${domain}:${repoPath}.git"
+            def result = "git@${domain}:${repoPath}.git"
+            println Utils.invalidConf("Resulting ssh URL: ${result}. If it's not valid, please provide actual URL under sshWhereabouts.SSH_REPOSITORY_URL.")
+            result
         } else {
-            throw new IllegalArgumentException("${Utils.error()} Not a valid HTTP(S) Git URL: $repository")
+            throw new IllegalArgumentException("[proto-sync::FATAL] Not a valid HTTP(S) Git URL: $repository")
         }
     }
 }
@@ -164,7 +169,7 @@ class SyncProtoTask extends DefaultTask {
     Integer depth
 
     @Input
-    Map<SshConfiguration, String> sshKeyWhereabouts
+    Map<SshConfiguration, String> sshWhereabouts
 
     @Internal
     File temp = project.file("${project.buildDir}/temp")
@@ -195,8 +200,8 @@ class SyncProtoTask extends DefaultTask {
             println "${Utils.info()} Cloning branch: $rulesBranch..."
             branch = rulesBranch
         }
-        sshKeyWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
-        Utils.clone(repository, branch, depth, temp.absolutePath, sshKeyWhereabouts)
+        sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
+        Utils.clone(repository, branch, depth, temp.absolutePath, sshWhereabouts)
         println Utils.success("Successfully cloned repository.")
         println "${Utils.info()} Now filtering only files requested..."
         List<Path> alreadyFound = []
@@ -320,22 +325,22 @@ class Utils {
             String branch = null,
             Integer depth,
             String repositoryPath,
-            Map<SshConfiguration, String> sshKeyWhereabouts,
+            Map<SshConfiguration, String> sshWhereabouts,
             File runAt = null
     ) {
-        def command = new CloneCommand(repository, repositoryPath, depth, branch)
+        def command = new CloneCommand(repository, repositoryPath, depth, branch, sshWhereabouts.get(SshConfiguration.SSH_REPOSITORY_URL))
         try {
             println "${info()} Cloning by HTTPS..."
             runProcess(command.cmd(), runAt)
         } catch (Exception ignored) {
-            if (!containsNotNull(sshKeyWhereabouts, SshConfiguration.NEXUS_URL)) {
+            if (!containsNotNull(sshWhereabouts, SshConfiguration.NEXUS_URL)) {
                 println invalidConf("No key URL provided, not trying ssh, aborting...")
                 throw ignored
             }
             println "${info()} Cloning by HTTPS failed, trying ssh..."
-            def key = getKeyFromNexus(sshKeyWhereabouts)
+            def key = getKeyFromNexus(sshWhereabouts)
             def keyPath = sanitizePath(key)
-            sshKeyWhereabouts.put(SshConfiguration.KEY_PATH, keyPath)
+            sshWhereabouts.put(SshConfiguration.KEY_PATH, keyPath)
             def pb = processBuilder(command.cmdSSH(),
                 ['GIT_SSH_COMMAND' : "ssh -i $keyPath".toString()]
             )
@@ -464,19 +469,19 @@ class ChangeRequestTask extends DefaultTask {
     String prefix
 
     @Input
-    Map<SshConfiguration, String> sshKeyWhereabouts
+    Map<SshConfiguration, String> sshWhereabouts
 
     @TaskAction
     void execute() {
         def source = new File(output)
         def tempRepo = new File(source, "temp-repo")
         File keyTemp = project.file("${project.buildDir}/key")
-        sshKeyWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
+        sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
         def git = new File(tempRepo, ".git")
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
         def branchName = "${prefix ? "$prefix-" : ""}${System.getProperty("user.name") ?: "UNKNOWN_USERNAME"}-at-${Instant.now().toEpochMilli()}".toString()
-        Utils.clone(repository, null, 1, tempRepo.absolutePath, sshKeyWhereabouts)
+        Utils.clone(repository, null, 1, tempRepo.absolutePath, sshWhereabouts)
         Utils.runProcess(["git", "checkout", "-b", branchName], tempRepo)
         source.eachFileRecurse { file ->
             if (!file.isFile()) return
@@ -490,7 +495,7 @@ class ChangeRequestTask extends DefaultTask {
         def cmd = ["git", "push", "--set-upstream", "origin", branchName]
         def pb = Utils.processBuilder(
                 cmd,
-                ['GIT_SSH_COMMAND' : "ssh -i ${sshKeyWhereabouts.get(SshConfiguration.KEY_PATH)}".toString()]
+                ['GIT_SSH_COMMAND' : "ssh -i ${sshWhereabouts.get(SshConfiguration.KEY_PATH)}".toString()]
         )
         Utils.runProcess(pb, tempRepo)
         if (git.exists()) git.deleteDir()
