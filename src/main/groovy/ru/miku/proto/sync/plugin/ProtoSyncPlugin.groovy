@@ -142,7 +142,7 @@ class CloneCommand {
         if (matcher.matches()) {
             def domain = matcher[0][1]
             def repoPath = matcher[0][2]
-            return "git@${domain}:${repoPath}.git"
+            return "ssh://git@${domain}:${repoPath}.git"
         } else {
             throw new IllegalArgumentException("${Utils.error()} Not a valid HTTP(S) Git URL: $repository")
         }
