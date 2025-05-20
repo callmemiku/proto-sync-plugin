@@ -75,11 +75,11 @@ class ProtoSyncPlugin implements Plugin<Project> {
 enum SshConfiguration {
     NEXUS_URL,
     FILE_TYPE,
-    FILE_NAME_IN_ARCHIVE,
+    PUBLIC_KEY_FILE,
+    PRIVATE_KEY_FILE,
     USER_ENV,
     PASSWORD_ENV,
-    SSH_REPOSITORY_URL,
-    KEY_PATH
+    SSH_REPOSITORY_URL
 }
 
 class Configuration {
@@ -90,6 +90,13 @@ class Configuration {
     Map<String, String> rules
     String autoBranchPrefix
     Map<SshConfiguration, String> sshWhereabouts
+}
+
+enum Internals {
+    PUBLIC_KEY_FILE_PATH,
+    PRIVATE_KEY_FILE_PATH,
+    KEYS_DIR,
+    GIT_HOST
 }
 
 class CloneCommand {
@@ -113,9 +120,11 @@ class CloneCommand {
         this.depth = depth
         this.branch = branch
         if (branch == null) mode = Mode.NO_BRANCH else mode = Mode.WITH_BRANCH
+        Utils.internals().put(Internals.GIT_HOST, Utils.extractGitHost(repositorySSH))
     }
 
     List<String> cmd() {
+        throw new IllegalStateException()
         if (mode == Mode.WITH_BRANCH) {
             ['git', 'clone', "--depth=$depth", '--branch', branch, '--single-branch', repository, repositoryPath]
         } else {
@@ -175,7 +184,7 @@ class SyncProtoTask extends DefaultTask {
     File temp = project.file("${project.buildDir}/temp")
 
     @Internal
-    File keyTemp = project.file("${project.buildDir}/ssh")
+    File keysTemp = project.file("${project.buildDir}/ssh")
 
     @Input
     String defaultBranch
@@ -188,7 +197,7 @@ class SyncProtoTask extends DefaultTask {
         if (defaultBranch == null) throw new IllegalStateException("[proto-sync::FATAL] No default branch provided, please provide in configuration under defaultBranch parameter!")
         if (rules == null || rules.isEmpty()) println Utils.invalidConf("No branching rules provided, always using default branch!")
         temp.parentFile.mkdirs()
-        keyTemp.parentFile.mkdirs()
+        keysTemp.parentFile.mkdirs()
         def currentBranch = System.getProperty("BRANCH") ?: System.getenv("BRANCH")
         if (Utils.isStringNotOK(currentBranch)) println Utils.invalidConf("No project branch name provided via properties. Example: -DBRANCH=NAME gradle ... . Using default ($defaultBranch).")
         def branch
@@ -200,7 +209,7 @@ class SyncProtoTask extends DefaultTask {
             println "${Utils.info()} Cloning branch: $rulesBranch..."
             branch = rulesBranch
         }
-        sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
+        Utils.internals().put(Internals.KEYS_DIR, keysTemp.absolutePath)
         Utils.clone(repository, branch, depth, temp.absolutePath, sshWhereabouts)
         println Utils.success("Successfully cloned repository.")
         println "${Utils.info()} Now filtering only files requested..."
@@ -267,6 +276,17 @@ class SyncProtoTask extends DefaultTask {
     }
 }
 
+class Keys {
+
+    File privateKey
+    File publicKey
+
+    Keys(File privateKey, File publicKey) {
+        this.privateKey = privateKey
+        this.publicKey = publicKey
+    }
+}
+
 class Utils {
 
     static boolean isStringNotOK(String patient) {
@@ -288,6 +308,12 @@ class Utils {
     static String success(String msg) {
         "${green()}[proto-sync::SUCCESS] $msg${reset()}"
     }
+
+    static Map<Internals, String> internals = new HashMap<>()
+
+    static Map<Internals, String> internals() {
+        internals
+    }
     
     private static String green() { '\u001B[32m' }
 
@@ -300,6 +326,13 @@ class Utils {
     private static String cyan() { '\u001B[36m' }
 
     static String reset() { '\u001B[0m' }
+
+    static String extractGitHost(String sshUrl) {
+        def matcher = sshUrl =~ /git@([^:]+):.*/
+        def host = matcher.matches() ? matcher[0][1] : null
+        if (host == null) throw new IllegalStateException("[proto-sync::FATAL] Malformed ssh git URL: ${sshUrl}.")
+        host
+    }
 
     static void runProcess(List<String> command, File runAt = null) {
         def proc = runAt ? command.execute(null, runAt) : command.execute()
@@ -338,13 +371,36 @@ class Utils {
                 throw ignored
             }
             println "${info()} Cloning by HTTPS failed, trying ssh..."
-            def key = getKeyFromNexus(sshWhereabouts)
-            def keyPath = sanitizePath(key)
-            sshWhereabouts.put(SshConfiguration.KEY_PATH, keyPath)
+            def keys = getKeysFromNexus(sshWhereabouts)
+            def publicKeyPath = sanitizePath(keys.publicKey)
+            internals.put(Internals.PUBLIC_KEY_FILE_PATH, publicKeyPath)
+            //registerKey(keys.publicKey.text)
+            def privateKeyPath = sanitizePath(keys.privateKey)
+            internals.put(Internals.PRIVATE_KEY_FILE_PATH, privateKeyPath)
             def pb = processBuilder(command.cmdSSH(),
-                ['GIT_SSH_COMMAND' : "ssh -i $keyPath".toString()]
+                ['GIT_SSH_COMMAND' : "ssh -i $privateKeyPath".toString()]
             )
             runProcess(pb, runAt)
+        }
+    }
+
+    private static registerKey(String key) {
+        def sshDir = new File(System.getProperty("user.home"), ".ssh")
+        if (!sshDir.exists()) {
+            sshDir.mkdirs()
+            sshDir.setReadable(true, true)
+            sshDir.setWritable(true, true)
+            sshDir.setExecutable(true, true)
+        }
+
+        def knownHostsFile = new File(sshDir, "known_hosts")
+        if (!knownHostsFile.exists()) {
+            knownHostsFile.createNewFile()
+        }
+        def preparedKey = "${safeGetFromInternals(Internals.GIT_HOST)} $key".trim()
+        def existingKeys = knownHostsFile.text.readLines()
+        if (!existingKeys.any { it.trim() == preparedKey }) {
+            knownHostsFile << preparedKey + "\n"
         }
     }
 
@@ -366,14 +422,19 @@ class Utils {
         }
     }
 
-    static String safeGetProperty(Map<SshConfiguration, String> props, SshConfiguration key) {
+    static String safeGetFromInternals(Internals key) {
+        safeGetProperty(internals, key)
+    }
+
+    static <T extends Enum<T>> String safeGetProperty(Map<T, String> props, T key) {
         def value = props.get(key)
         if (isStringNotOK(value)) throw new IllegalStateException("[proto-sync::FATAL] Invalid value in property ${key.name()}: ${value}")
         value
     }
 
-    static File getKeyFromNexus(Map<SshConfiguration, String> sshKeyWhereabouts) {
-        def keyFileName = safeGetProperty(sshKeyWhereabouts, SshConfiguration.FILE_NAME_IN_ARCHIVE)
+    static Keys getKeysFromNexus(Map<SshConfiguration, String> sshKeyWhereabouts) {
+        def privateKeyFileName = safeGetProperty(sshKeyWhereabouts, SshConfiguration.PRIVATE_KEY_FILE)
+        def publicKeyFileName = safeGetProperty(sshKeyWhereabouts, SshConfiguration.PUBLIC_KEY_FILE)
         FileType mode
         switch (safeGetProperty(sshKeyWhereabouts, SshConfiguration.FILE_TYPE).toLowerCase()) {
             case 'jar': mode = FileType.JAR
@@ -391,7 +452,7 @@ class Utils {
             if (password == null) throw new IllegalStateException("[proto-sync::FATAL] No property exists on provided property: $passwordKey.")
             connection.setRequestProperty("Authorization", "Basic " + "$user:$password".bytes.encodeBase64().toString())
         } else println invalidConf("No auth credentials provided, going in unauthorized.")
-        def path = safeGetProperty(sshKeyWhereabouts, SshConfiguration.KEY_PATH)
+        def path = safeGetFromInternals(Internals.KEYS_DIR)
         def download = Paths.get(path).resolve("download${mode.ext}").normalize().toFile()
         println success("Successfully downloaded ${download.name}.")
         download.parentFile.mkdirs()
@@ -400,26 +461,41 @@ class Utils {
                 out << input
             }
         }
-        def output = Paths.get(path).resolve("ssh-key").normalize().toFile()
-        output.parentFile.mkdirs()
-        output.createNewFile()
+        def privateKey = Paths.get(path).resolve("private-ssh-key").normalize().toFile()
+        def publicKey = Paths.get(path).resolve("public-ssh-key").normalize().toFile()
+        privateKey.parentFile.mkdirs()
+        publicKey.parentFile.mkdirs()
+        privateKey.createNewFile()
+        publicKey.createNewFile()
         switch (mode) {
             case FileType.JAR:
                 def jar = new JarFile(download)
-                def key = jar.getJarEntry(keyFileName)
-                def is = jar.getInputStream(key)
-                def os = new FileOutputStream(output)
+                def privateKeyEntry = jar.getJarEntry(privateKeyFileName)
+                def is = jar.getInputStream(privateKeyEntry)
+                def os = new FileOutputStream(privateKey)
                 byte[] buffer = new byte[4096]
                 int len
                 while ((len = is.read(buffer)) != -1) {
                     os.write(buffer, 0, len)
                 }
+                def publicKeyEntry = jar.getJarEntry(publicKeyFileName)
+                is = jar.getInputStream(publicKeyEntry)
+                os = new FileOutputStream(publicKey)
+                while ((len = is.read(buffer)) != -1) {
+                    os.write(buffer, 0, len)
+                }
                 jar.close()
                 break
-            default: output.write(download.text)
+            default: {
+                def split = download.text.split('empty-line-between').collect { it.trim() }
+                if (split.size() == 2) {
+                    publicKey.write(split[0])
+                    privateKey.write(split[1])
+                } else throw new IllegalStateException("[proto-sync::FATAL] Malformed raw keyfile.")
+            }
         }
-        println success("Successfully processed key file, stored as ${Paths.get(path).parent.parent.relativize(output.toPath())}.")
-        return output
+        println success("Successfully processed key file, stored as ${Paths.get(path).parent.parent.relativize(privateKey.toPath())}.")
+        return new Keys(privateKey, publicKey)
     }
 
     private enum FileType {
@@ -475,8 +551,8 @@ class ChangeRequestTask extends DefaultTask {
     void execute() {
         def source = new File(output)
         def tempRepo = new File(source, "temp-repo")
-        File keyTemp = project.file("${project.buildDir}/key")
-        sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
+        File keysTemp = project.file("${project.buildDir}/key")
+        Utils.internals().put(Internals.KEYS_DIR, keysTemp.absolutePath)
         def git = new File(tempRepo, ".git")
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
@@ -495,7 +571,7 @@ class ChangeRequestTask extends DefaultTask {
         def cmd = ["git", "push", "--set-upstream", "origin", branchName]
         def pb = Utils.processBuilder(
                 cmd,
-                ['GIT_SSH_COMMAND' : "ssh -i ${sshWhereabouts.get(SshConfiguration.KEY_PATH)}".toString()]
+                ['GIT_SSH_COMMAND' : "ssh -i ${Utils.safeGetFromInternals(Internals.PRIVATE_KEY_FILE_PATH)}".toString()]
         )
         Utils.runProcess(pb, tempRepo)
         if (git.exists()) git.deleteDir()

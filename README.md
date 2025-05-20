@@ -33,8 +33,10 @@ protoSync {
     defaultBranch = "dev"
     //optional parameter which allows to add prefix to branches created with commitChangeRequest task
     autoBranchPrefix = "test-prefix"
-    //optional parameter, contains coordinates of artifact containing key. following example for jar containing id_ed25519 file in root dir
+    //optional parameter, contains everything about ssh. following example for jar containing id_ed25519 file in root dir
     keyStorage = mapOf<SshConfiguration, String>(
+        //if you are planing to use raw, you should follow the structure:
+        //public key \n `empty-line-between` \n private key, `empty-line-between` is exact delimiter is used
         FILE_TYPE to "jar", //supports jar and raw, zip in plans
         FILE_NAME_IN_ARCHIVE to "id_ed25519", //can be omitted if download is raw
         NEXUS_URL to "https://nexus-host/repository/maven-releases/ru/miku/key-storage/1.0.0/key-storage-1.0.0.jar",
