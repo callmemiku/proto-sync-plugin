@@ -4,10 +4,12 @@ import groovy.io.FileType
 import org.gradle.api.DefaultTask
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.SourceDirectorySet
 import org.gradle.api.plugins.ExtensionAware
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.tasks.TaskAction
 
@@ -20,13 +22,15 @@ class ProtoSyncPlugin implements Plugin<Project> {
     void apply(Project project) {
         project.extensions.create('protoSync', Configuration)
         def config = project.protoSync
-        def calculatedOutput = Paths.get(project.buildDir.absolutePath, "resources", "main", "proto-sync").toFile().absolutePath
+        def output = project.file("${project.buildDir.absolutePath}/resources/main/proto-sync")
+        def sshOutput = project.file("${project.buildDir.absolutePath}/ssh")
         project.afterEvaluate {
             project.tasks.register('syncProtoFromRepository', SyncProtoTask) {
                 group = 'proto'
                 description = 'Syncs proto using provided repository'
                 repository = config.repository
-                output = calculatedOutput
+                outputDirectory.set(output)
+                sshOutputDirectory.set(sshOutput)
                 requested = config.services
                 depth = config.depth ?: 3
                 rules = config.rules
@@ -37,7 +41,8 @@ class ProtoSyncPlugin implements Plugin<Project> {
                 group = 'proto'
                 description = 'Prepares and pushes branch to proto repository'
                 repository = config.repository
-                output = calculatedOutput
+                outputDirectory.set(output)
+                sshOutputDirectory.set(sshOutput)
                 prefix = config.autoBranchPrefix
                 sshWhereabouts = config.sshWhereabouts
             }
@@ -68,6 +73,9 @@ class ProtoSyncPlugin implements Plugin<Project> {
             project.tasks.named('generateProto').configure { generateProtoTask ->
                 generateProtoTask.dependsOn('processResources')
             }
+        }
+        project.tasks.named("processResources") {
+            dependsOn("syncProtoFromRepository")
         }
     }
 }
@@ -160,8 +168,11 @@ class SyncProtoTask extends DefaultTask {
     @Input
     String repository
 
-    @Input
-    String output
+    @OutputDirectory
+    final DirectoryProperty outputDirectory = project.objects.directoryProperty()
+
+    @OutputDirectory
+    final DirectoryProperty sshOutputDirectory = project.objects.directoryProperty()
 
     @Input
     List<String> requested
@@ -175,9 +186,6 @@ class SyncProtoTask extends DefaultTask {
     @Internal
     File temp = project.file("${project.buildDir}/temp")
 
-    @Internal
-    File keyTemp = project.file("${project.buildDir}/ssh")
-
     @Input
     String defaultBranch
 
@@ -186,10 +194,13 @@ class SyncProtoTask extends DefaultTask {
 
     @TaskAction
     void execute() {
+        if (requested.isEmpty()) {
+            Log.invalidConf "No services in configuration, execution skipped."
+            return
+        }
         if (defaultBranch == null) throw Log.fatal("No default branch provided, please provide in configuration under defaultBranch parameter!")
         if (rules == null || rules.isEmpty()) Log.invalidConf "No branching rules provided, always using default branch!"
         temp.parentFile.mkdirs()
-        keyTemp.parentFile.mkdirs()
         def currentBranch = System.getProperty("BRANCH") ?: System.getenv("BRANCH")
         if (Utils.isStringNotOK(currentBranch)) Log.invalidConf "No project branch name provided via properties. Example: -DBRANCH=NAME gradle ... . Using default ($defaultBranch)."
         def branch
@@ -201,14 +212,14 @@ class SyncProtoTask extends DefaultTask {
             Log.info("Cloning branch: $rulesBranch...")
             branch = rulesBranch
         }
-        sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
+        sshWhereabouts.put(SshConfiguration.KEY_PATH, sshOutputDirectory.asFile.get().absolutePath)
         Utils.clone(repository, branch, depth, temp.absolutePath, sshWhereabouts)
         Log.success "Successfully cloned repository."
         Log.info "Now filtering only files requested..."
         List<Path> alreadyFound = []
         def filesToLook = requested.collect { (it + ".proto").toUpperCase() }.unique()
-        if (!filesToLook.isEmpty()) Log.info "Initially looking for ${filesToLook.toString()}"
-        else Log.invalidConf "No services in configuration, filtering skipped."
+        Log.info "Initially looking for ${filesToLook.toString()}"
+        def output = outputDirectory.getAsFile().get().toPath()
         while (!filesToLook.isEmpty()) {
             def additionallyFound = []
             def found = []
@@ -228,7 +239,7 @@ class SyncProtoTask extends DefaultTask {
                                     .toUpperCase()
                         }
 
-                        def target = Paths.get(output).resolve(relativePath).normalize().toFile()
+                        def target = output.resolve(relativePath).normalize().toFile()
                         def protoDir = new File(target.parent)
                         if (protoDir.exists() && !protoDir.isDirectory()) {
                             protoDir.delete()
@@ -353,6 +364,7 @@ class Utils {
             }
             Log.info "Cloning by HTTPS failed, trying ssh..."
             def key = getKeyFromNexus sshWhereabouts
+            Log.info "Key ok, now cloning..."
             def keyPath = sanitizePath key
             sshWhereabouts.put(SshConfiguration.KEY_PATH, keyPath)
             def pb = processBuilder command.cmdSSH(), ['GIT_SSH_COMMAND': "ssh -i $keyPath".toString()]
@@ -405,13 +417,13 @@ class Utils {
         } else Log.invalidConf "No auth credentials provided, going in unauthorized."
         def path = safeGetProperty(sshKeyWhereabouts, SshConfiguration.KEY_PATH)
         def download = Paths.get(path).resolve("download${mode.ext}").normalize().toFile()
-        Log.success "Successfully downloaded ${download.name}."
         download.parentFile.mkdirs()
         download.withOutputStream { out ->
             connection.inputStream.withStream { input ->
                 out << input
             }
         }
+        Log.success "Successfully downloaded ${download.name}."
         def output = Paths.get(path).resolve("ssh-key").normalize().toFile()
         output.parentFile.mkdirs()
         output.createNewFile()
@@ -439,7 +451,7 @@ class Utils {
         Log.info "Changing permissions of ${file.parentFile.name}/${file.name} to $chmod."
         if (System.getProperty("os.name")?.toLowerCase()?.contains("win") ?: false) {
             Log.info "Unlucky, can't chmod on windows."
-        } else runProcess (['chmod', "$chmod".toString(), file.absolutePath])
+        } else runProcess(['chmod', "$chmod".toString(), file.absolutePath])
     }
 
     private enum FileType {
@@ -482,8 +494,11 @@ class ChangeRequestTask extends DefaultTask {
     @Input
     String repository
 
-    @Input
-    String output
+    @OutputDirectory
+    final DirectoryProperty outputDirectory = project.objects.directoryProperty()
+
+    @OutputDirectory
+    final DirectoryProperty sshOutputDirectory = project.objects.directoryProperty()
 
     @Input
     String prefix
@@ -493,10 +508,9 @@ class ChangeRequestTask extends DefaultTask {
 
     @TaskAction
     void execute() {
-        def source = new File(output)
+        def source = outputDirectory.asFile.get()
         def tempRepo = new File(source, "temp-repo")
-        File keyTemp = project.file("${project.buildDir}/key")
-        sshWhereabouts.put(SshConfiguration.KEY_PATH, keyTemp.absolutePath)
+        sshWhereabouts.put(SshConfiguration.KEY_PATH, sshOutputDirectory.asFile.get().absolutePath)
         def git = new File(tempRepo, ".git")
         if (git.exists()) git.deleteDir()
         if (tempRepo.exists()) tempRepo.deleteDir()
