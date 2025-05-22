@@ -236,6 +236,7 @@ class SyncProtoTask extends DefaultTask {
                         } else {
                             protoDir.mkdirs()
                         }
+                        it.createNewFile()
                         Log.info "File ${it.name} created."
                         target.write(it.text)
                         Log.info "Protofile ${it.name} is ready to use."
