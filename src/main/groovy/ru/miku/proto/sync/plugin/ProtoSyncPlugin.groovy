@@ -79,6 +79,7 @@ enum SshConfiguration {
     USER_ENV,
     PASSWORD_ENV,
     SSH_REPOSITORY_URL,
+    CHMOD,
     KEY_PATH
 }
 
@@ -429,15 +430,15 @@ class Utils {
             default: output.write(download.text)
         }
         Log.success "Successfully processed key file, stored as ${Paths.get(path).parent.parent.relativize(output.toPath())}."
-        chmod600(output)
+        chmod(output, sshKeyWhereabouts.get(SshConfiguration.CHMOD)?.toInteger() ?: 400)
         return output
     }
 
-    private static void chmod600(File file) {
-        Log.info "Changing permissions of ${file.parentFile.name}/${file.name} to 600."
-        if (System.getProperty("os.name")?.toLowerCase()?.contains("win")) {
+    private static void chmod(File file, int chmod) {
+        Log.info "Changing permissions of ${file.parentFile.name}/${file.name} to $chmod."
+        if (System.getProperty("os.name")?.toLowerCase()?.contains("win") ?: false) {
             Log.info "Unlucky, can't chmod on windows."
-        } else runProcess (['chmod', "600", file.absolutePath])
+        } else runProcess (['chmod', "$chmod".toString(), file.absolutePath])
     }
 
     private enum FileType {

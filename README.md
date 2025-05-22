@@ -44,7 +44,9 @@ protoSync {
         PASSWORD_ENV to "NEXUS_PASSWORD",
         //if URL provided here, plugin won't try to automatically convert
         //in otherwise plugin will notify you with conversion results, so it's possible to track possible problems
-        SSH_REPOSITORY_URL to "ssh://git@repository-host:4444/project/proto-storage.git"
+        SSH_REPOSITORY_URL to "ssh://git@repository-host:4444/project/proto-storage.git",
+        //chmod value, if not provided, uses 400
+        CHMOD to "600"
     )
 }
 ```
