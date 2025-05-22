@@ -27,7 +27,7 @@ gradlePlugin {
         extension {
             id = 'io.github.callmemiku.proto-sync'
             displayName = /miku's proto sync helper/
-            description = "looks up to repository and gathers protofiles from list 'services' in configuration"
+            description = "Syncs proto files from repository both with HTTPS and SSH."
             tags = ['protobuf', 'proto', 'support', 'git']
             implementationClass = 'ru.miku.proto.sync.plugin.ProtoSyncPlugin'
         }
